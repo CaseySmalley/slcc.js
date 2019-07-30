@@ -53,6 +53,37 @@ function() {
 		")",
 		"{",
 		"}",
+		"[",
+		"]",
+		"+",
+		"-",
+		"*",
+		"/",
+		"&",
+		"|",
+		"^",
+		"~",
+		"||",
+		"&&",
+		"==",
+		"!=",
+		"<",
+		">",
+		"<=",
+		">=",
+		"<<",
+		">>",
+		"++",
+		"--",
+		"=",
+		"+=",
+		"-=",
+		"*=",
+		"/=",
+		"&=",
+		"^=",
+		"<<=",
+		">>=",
 		";"
 	);
 
@@ -180,11 +211,14 @@ function() {
 
 			if (lex_is_newline(char)) {
 				lex_error("newline in string");
+			} else if (char === "\\") {
+				++length;
 			}
 		} while(!lex_eof() && char !== "\"")
 
 		++lex_current_pos;
 		lex_get_token(length - 1);
+		++lex_current_pos;
 
 		return true;
 	}
