@@ -62,10 +62,15 @@ function() {
 		"-",
 		"*",
 		"/",
+		"%",
 		"&",
 		"|",
 		"^",
 		"~",
+		"?",
+		":",
+		"!",
+		";",
 		"->",
 		"||",
 		"&&",
@@ -87,8 +92,7 @@ function() {
 		"&=",
 		"^=",
 		"<<=",
-		">>=",
-		";"
+		">>="
 	);
 
 	var lex_tokens = null;
@@ -116,7 +120,7 @@ function() {
 	}
 
 	function lex_eof() {
-		return lex_current_pos === source_code.length;
+		return lex_current_pos >= source_code.length;
 	}
 
 	function lex_peek_char(offset) {
@@ -386,18 +390,40 @@ function() {
 	}
 
 	var syn_ast_root = null;
-	var syn_symbol_table = null;
+	var syn_typedef_table = null;
+	var syn_struct_table = null;
+	var syn_union_table = null;
+	var syn_enum_table = null;
+	var syn_pos_stack = [];
 	var syn_current_pos = 0;
-	var syn_current_pos_save = 0;
+	var syn_token = null;
 
-	function Ast_Node(type,value,children) {
+	function Ast_Node(type,value) {
 		this.type = type;
-		this.value = value;
-		this.children = children || [];
+		this.value = null;
+		this.children = [];
+
+		var i = 1;
+
+		if (!(arguments[i] instanceof(Ast_Node))) {
+			this.value = arguments[i++];
+		}
+
+		for (; i < arguments.length; ++i) {
+			this.children.push(arguments[i]);
+		}
+	}
+
+	function syn_eof() {
+		return syn_current_pos >= lex_tokens.length;
+	}
+
+	function syn_peek_token(offset) {
+		return lex_tokens[syn_current_pos + offset];
 	}
 
 	function syn_error() {
-		var token = syn_peek_token(0);
+		var token = syn_peek_token(0) || syn_token;
 
 		resource.error(
 			"SLCC_SYNTAX_ERROR: col %d line %d, %s",
@@ -407,51 +433,419 @@ function() {
 		);
 	}
 
-	function syn_eof() {
-		return syn_current_pos === lex_tokens.length;
+	function syn_push() {
+		syn_pos_stack.push(syn_current_pos);
 	}
 
-	function syn_seek_pos(offset) {
-		syn_current_pos += offset;
+	function syn_pop() {
+		syn_pos_stack.pop();
 	}
 
-	function syn_save_pos() {
-		syn_current_pos_save = syn_current_pos;
+	function syn_restore() {
+		syn_current_pos = syn_pos_stack.pop();
+		syn_token = lex_tokens[syn_current_pos];
 	}
 
-	function syn_load_pos() {
-		syn_current_pos = syn_current_pos_save;
+	function syn_consume() {
+		syn_token = lex_tokens[syn_current_pos++];
 	}
-	
-	function syn_peek_token(offset) {
-		return lex_tokens[syn_current_pos + offset];
+
+	function syn_accept() {
+		var token = lex_tokens[syn_current_pos];
+
+		if (token) {
+			for (var i = 0; i < arguments.length; ++i) {
+				if (arguments[i] === token.type) {
+					syn_consume();
+					return true;
+				}
+			}
+		}
+
+		return false;
 	}
-	
+
 	function syn_expect(type) {
-		var token = syn_peek_token(0);
+		var token = lex_tokens[syn_current_pos];
 
-		if (token.type !== type) {
-			syn_error("expected a '%s' got a '%s' instead",type,token.type);
+		if (!token || type !== token.type) {
+			syn_error("expected a '%s'",type);
 		}
 
-		syn_seek_pos(1);
-
-		return token;
+		syn_consume();
+		return true;
 	}
 
-	function syn_accept(type) {
-		var token = syn_peek_token(0);
+	function syn_primary_expression() {
+		if (syn_accept("identifier")) {
+			return new Ast_Node("variable",syn_token.value);
+		} else if (syn_accept(
+			"char_literal",
+			"integer_literal",
+			"float_literal",
+			"string_literal"
+		)) {
+			return new Ast_Node(syn_token.type,syn_token.value);
+		} else if (syn_accept("(")) {
+			var node = syn_expression();
+			syn_expect(")");
 
-		if (token.type !== type) {
-			return null;
+			return node;
+		} else {
+			syn_error("expected an identifier or a literal");
+		}
+	}
+
+	function syn_postfix_expression() {
+		var node = syn_primary_expression();
+		var has_match = true;
+
+		while(has_match) {
+			has_match = false;
+
+			if (syn_accept("[")) {
+				has_match = true;
+				node = new Ast_Node("subscript",node,syn_expression());
+				syn_expect("]");
+			} else if (syn_accept("(")) {
+				has_match = true;
+				node = new Ast_Node("function_call",node);
+
+				if (syn_peek_token(0).type !== ")") {
+					node.children = syn_argument_expression_list();
+				}	
+				
+				syn_expect(")");
+			} else if (syn_accept(".")) {
+				has_match = true;
+				syn_expect("identifier");
+				node = new Ast_Node("dot_accessor",syn_token.value,node);
+			} else if (syn_accept("->")) {
+				has_match = true;
+				syn_expect("identifier");
+				node = new Ast_Node("pointer_accessor",syn_token.value,node);
+			} else if (syn_accept("++")) {
+				has_match = true;
+				node = new Ast_Node("postfix_operator",syn_token.value,node);
+			} else if (syn_accept("--")) {
+				has_match = true;
+				node = new Ast_Node("postfix_operator",syn_token.value,node);
+			}
 		}
 
-		syn_seek_pos(1);
+		return node;
+	}
 
-		return token;
+	function syn_argument_expression_list() {
+		var nodes = [];
+
+		do {
+			nodes.push(syn_assignment_expression());
+		} while(syn_accept(","))
+
+		return nodes;
+	}
+
+	function syn_unary_expression() {
+		var node = syn_unary_operator();
+
+		if (syn_accept("++","--")) {
+			node = new Ast_Node("prefix_operator",syn_token.value);
+			node.children.push(syn_cast_expression());
+		} else if (node) {
+			if (node.type === "sizeof_operator" &&  syn_accept("(")) {
+				node.children.push(syn_type_name());
+				syn_expect(")");
+			} else {
+				node.children.push(syn_unary_expression());
+			}
+		} else {
+			node = syn_postfix_expression();
+		}
+
+		return node;
+	}
+
+	function syn_unary_operator() {
+		if (syn_accept(
+			"&",
+			"*",
+			"+",
+			"-",
+			"~",
+			"!",
+		)) {
+			return new Ast_Node("unary_operator",syn_token.value);
+		} else if (syn_accept("sizeof")) {
+			return new Ast_Node("sizeof_operator");
+		}
+	}
+
+	function syn_cast_expression() {
+		var node = undefined;
+		syn_push();
+
+		if (syn_accept("(")) {
+			try {
+				node = syn_type_name();
+			} catch(error) {
+				syn_restore();
+				return syn_unary_expression();
+			}
+
+			syn_expect(")");
+			node = new Ast_Node("cast",node);
+			node.children.push(syn_unary_expression());
+		} else {
+			node = syn_unary_expression();
+		}
+
+		syn_pop();
+		return node;
+	}
+
+	function syn_multiplicative_expression() {
+		var node = syn_cast_expression();
+
+		if (syn_accept(
+			"*",
+			"/",
+			"%"
+		)) {
+			node = new Ast_Node("multiplicative_operator",syn_token.value,node);
+			node.children.push(syn_multiplicative_expression());
+		}
+
+		return node;
+	}
+
+	function syn_additive_expression() {
+		var node = syn_multiplicative_expression();
+
+		if (syn_accept(
+			"+",
+			"-"
+		)) {
+			node = new Ast_Node("additive_operator",syn_token.value,node);
+			node.children.push(syn_additive_expression());
+		}
+
+		return node;
+	}
+
+	function syn_shift_expression() {
+		
+	}
+
+	function syn_relational_expression() {
+		
+	}
+
+	function syn_equality_expression() {
+		
+	}
+
+	function syn_and_expression() {
+		
+	}
+
+	function syn_exsclusive_or_expression() {
+		
+	}
+
+	function syn_inclusive_or_expression() {
+		
+	}
+
+	function syn_logical_and_expression() {
+		
+	}
+
+	function syn_logical_or_expression() {
+		
+	}
+
+	function syn_conditional_expression() {
+		
+	}
+
+	function syn_assignment_expression() {
+		
+	}
+
+	function syn_assignment_operator() {
+		
+	}
+
+	function syn_expression() {
+		return new Ast_Node("expression",undefined,[syn_additive_expression()]);
+	}
+
+	function syn_constant_expression() {
+		
 	}
 
 	function syn_declaration() {
+		
+	}
+
+	function syn_declaration_specifiers() {
+		
+	}
+
+	function syn_init_declarator_list() {
+		
+	}
+
+	function syn_init_declarator() {
+		
+	}
+
+	function syn_storage_class_specifier() {
+		
+	}
+
+	function syn_type_specifier() {
+		
+	}
+
+	function syn_struct_or_union_specifier() {
+		
+	}
+
+	function syn_struct_or_union() {
+		
+	}
+
+	function syn_struct_declaration_list() {
+		
+	}
+
+	function syn_struct_declaration() {
+		
+	}
+
+	function syn_specifier_qualifier_list() {
+		
+	}
+
+	function syn_declarator_list() {
+		
+	}
+
+	function syn_struct_declarator() {
+		
+	}
+
+	function syn_enum_specifier() {
+		
+	}
+
+	function syn_enumerator_list() {
+		
+	}
+
+	function syn_enumerator() {
+		
+	}
+
+	function syn_type_qualifier() {
+		
+	}
+
+	function syn_declarator() {
+		
+	}
+
+	function syn_direct_declarator() {
+		
+	}
+
+	function syn_pointer() {
+		
+	}
+
+	function syn_type_qualifier_list() {
+		
+	}
+
+	function syn_parameter_type_list() {
+		
+	}
+
+	function syn_parameter_list() {
+		
+	}
+
+	function syn_parameter_declaration() {
+		
+	}
+
+	function syn_identifier_list() {
+		
+	}
+
+	function syn_type_name() {
+		syn_error("");
+	}
+
+	function syn_abstract_declarator() {
+		
+	}
+
+	function syn_direct_abstract_declarator() {
+		
+	}
+
+	function syn_initializer() {
+		
+	}
+
+	function syn_initializer_list() {
+		
+	}
+
+	function syn_statement() {
+		
+	}
+
+	function syn_labeled_statement() {
+		
+	}
+
+	function syn_compound_statement() {
+		
+	}
+
+	function syn_declaration_list() {
+		
+	}
+
+	function syn_statement_list() {
+		
+	}
+
+	function syn_expression_statement() {
+		
+	}
+
+	function syn_selection_statement() {
+		
+	}
+
+	function syn_iteration_statement() {
+		
+	}
+
+	function syn_jump_statement() {
+		
+	}
+
+	function syn_translation_unit() {
+		
+	}
+
+	function syn_external_declaration() {
 		
 	}
 
@@ -459,49 +853,31 @@ function() {
 		
 	}
 
-	function syn_external_declaration() {
-		syn_save_pos();
-
-		var node = syn_function_definition();
-
-		if (node) {
-			return node;
-		}
-
-		syn_load_pos();
-		node = syn_declaration();
-
-		if (node) {
-			return node;
-		} else {
-			syn_load_pos();
-			syn_error("invalid external declaration");
-		}
-	}
-
-	function syn_translation_unit() {
-		var node = new Ast_Node("translation_unit");
-		
-		while (!syn_eof()) {
-			node.children.push(syn_external_declaration());
-		}
-
-		return node
-	}
-
 	function syntax_analysis() {
-		syn_ast_root = syn_translation_unit();
+		syn_typedef_table = {};
+		syn_struct_table = {};
+		syn_union_table = {};
+		syn_enum_table = {};
+		syn_pos_stack = [];
+
+		if (!syn_eof()) {
+			syn_ast_root = syn_expression();
+		}
 	}
 
 	function semantic_analysis() {
 
 	}
 
+	function vm_code_generation() {
+		
+	}
+
 	function asm_js_code_generation() {
 
 	}
 
-	function web_assembly_code_generation() {
+	function wasm_code_generation() {
 		
 	}
 
@@ -514,14 +890,18 @@ function() {
 		lex_current_line = 1;
 
 		syn_ast_root = null;
-		syn_symbol_table = null;
+		syn_typedef_table = null;
+		syn_struct_table = null;
+		syn_union_table = null;
+		syn_enum_table = null;
+		syn_pos_stack = null;
 		syn_current_pos = 0;
-		syn_current_pos_save = 0;
 	}
 
 	return {
-		ASM_JS: 1,
-		WEB_ASSEMBLY: 2,
+		VM: 1,
+		ASM_JS: 2,
+		WASM: 3,
 
 		parse: function(src) {
 			reset_vars(src);
