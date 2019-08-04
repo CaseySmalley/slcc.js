@@ -612,7 +612,7 @@ function() {
 			"/",
 			"%"
 		)) {
-			node = new Ast_Node("multiplicative_operator",syn_token.value,node);
+			node = new Ast_Node(syn_token.value,node);
 			node.children.push(syn_multiplicative_expression());
 		}
 
@@ -626,7 +626,7 @@ function() {
 			"+",
 			"-"
 		)) {
-			node = new Ast_Node("additive_operator",syn_token.value,node);
+			node = new Ast_Node(syn_token.value,node);
 			node.children.push(syn_additive_expression());
 		}
 
@@ -634,55 +634,162 @@ function() {
 	}
 
 	function syn_shift_expression() {
-		
+		var node = syn_additive_expression();
+
+		if (syn_accept(
+			"<<",
+			">>"
+		)) {
+			node = new Ast_Node(syn_token.value,node);
+			node.children.push(syn_shift_expression());
+		}
+
+		return node;
 	}
 
 	function syn_relational_expression() {
-		
+		var node = syn_shift_expression();
+
+		if (syn_accept(
+			"<",
+			">",
+			"<=",
+			">="
+		)) {
+			node = new Ast_Node(syn_token.value,node);
+			node.children.push(syn_relational_expression());
+		}
+
+		return node;
 	}
 
 	function syn_equality_expression() {
-		
+		var node = syn_relational_expression();
+
+		if (syn_accept(
+			"==",
+			"!="
+		)) {
+			node = new Ast_Node(syn_token.value,node);
+			node.children.push(syn_equality_expression());
+		}
+
+		return node;
 	}
 
 	function syn_and_expression() {
-		
+		var node = syn_equality_expression();
+
+		if (syn_accept("&")) {
+			node = new Ast_Node(syn_token.value,node);
+			node.children.push(syn_and_expression());
+		}
+
+		return node;
 	}
 
-	function syn_exsclusive_or_expression() {
-		
+	function syn_exclusive_or_expression() {
+		var node = syn_and_expression();
+
+		if (syn_accept("^")) {
+			node = new Ast_Node(syn_token.value,node);
+			node.children.push(syn_exclusive_or_expression());
+		}
+
+		return node;
 	}
 
 	function syn_inclusive_or_expression() {
-		
+		var node = syn_exclusive_or_expression();
+
+		if (syn_accept("|")) {
+			node = new Ast_Node(syn_token.value,node);
+			node.children.push(syn_inclusive_or_expression());
+		}
+
+		return node;
 	}
 
 	function syn_logical_and_expression() {
-		
+		var node = syn_inclusive_or_expression();
+
+		if (syn_accept("&&")) {
+			node = new Ast_Node(syn_token.value,node);
+			node.children.push(syn_logical_and_expression());
+		}
+
+		return node;
 	}
 
 	function syn_logical_or_expression() {
-		
+		var node = syn_logical_and_expression();
+
+		if (syn_accept("||")) {
+			node = new Ast_Node(syn_token.value,node);
+			node.children.push(syn_logical_or_expression());
+		}
+
+		return node;
 	}
 
 	function syn_conditional_expression() {
-		
+		var node = syn_logical_or_expression();
+
+		if (syn_accept("?")) {
+			node = new Ast_Node("ternary_operator",node);
+			node.children.push(syn_expression());
+			syn_expect(":");
+			node.children.push(syn_conditional_expression());
+		}
+
+		return node;
 	}
 
 	function syn_assignment_expression() {
-		
-	}
+		var node = null;
+		syn_push();
 
-	function syn_assignment_operator() {
-		
+		try {
+			node = syn_unary_expression();
+		} catch(error) {
+			syn_restore();
+			return syn_conditional_expression();
+		}
+
+		if (!syn_accept(
+			"=",
+			"*=",
+			"/=",
+			"%=",
+			"+=",
+			"-=",
+			"<<=",
+			">>=",
+			"^=",
+			"|="
+		)) {
+			syn_restore();
+			return syn_conditional_expression();
+		}
+
+		node = new Ast_Node(syn_token.value,node);
+		node.children.push(syn_assignment_expression());
+
+		return node;
 	}
 
 	function syn_expression() {
-		return new Ast_Node("expression",undefined,[syn_additive_expression()]);
+		var node = new Ast_Node("expression");
+
+		do {
+			node.children.push(syn_assignment_expression());
+		} while(syn_accept(","));
+
+		return node;
 	}
 
 	function syn_constant_expression() {
-		
+		return syn_conditional_expression();
 	}
 
 	function syn_declaration() {
