@@ -28,6 +28,7 @@ function() {
 		"struct",
 		"union",
 		"enum",
+		"auto",
 		"register",
 		"volatile",
 		"const",
@@ -390,10 +391,7 @@ function() {
 	}
 
 	var syn_ast_root = null;
-	var syn_typedef_table = null;
-	var syn_struct_table = null;
-	var syn_union_table = null;
-	var syn_enum_table = null;
+	var syn_type_table = null;
 	var syn_pos_stack = [];
 	var syn_current_pos = 0;
 	var syn_token = null;
@@ -418,12 +416,28 @@ function() {
 		return syn_current_pos >= lex_tokens.length;
 	}
 
-	function syn_peek_token(offset) {
-		return lex_tokens[syn_current_pos + offset];
+	function syn_peek_type(offset) {
+		var token = lex_tokens[syn_current_pos + offset];
+
+		if (token) {
+			return token.type;
+		} else {
+			return "?_UNKNOWN_?";
+		}
+	}
+
+	function syn_peek_value(offset) {
+		var token = lex_tokens[syn_current_pos + offset];
+
+		if (token) {
+			return token.value;
+		} else {
+			return "?_UNKNOWN_?";
+		}
 	}
 
 	function syn_error() {
-		var token = syn_peek_token(0) || syn_token;
+		var token = lex_tokens[syn_current_pos] || syn_token;
 
 		resource.error(
 			"SLCC_SYNTAX_ERROR: col %d line %d, %s",
@@ -448,6 +462,7 @@ function() {
 
 	function syn_consume() {
 		syn_token = lex_tokens[syn_current_pos++];
+		return syn_token;
 	}
 
 	function syn_accept() {
@@ -511,7 +526,7 @@ function() {
 				has_match = true;
 				node = new Ast_Node("function_call",node);
 
-				if (syn_peek_token(0).type !== ")") {
+				if (syn_peek_type(0) !== ")") {
 					node.children = syn_argument_expression_list();
 				}	
 				
@@ -775,6 +790,7 @@ function() {
 		node = new Ast_Node(syn_token.value,node);
 		node.children.push(syn_assignment_expression());
 
+		syn_pop();
 		return node;
 	}
 
@@ -793,71 +809,286 @@ function() {
 	}
 
 	function syn_declaration() {
+		var node = new Ast_Node("declaration");
 		
+		node.children.push(syn_declaration_specifiers());
+
+		if (!syn_accept(";")) {
+			node.children = syn_init_declarator_list();
+			syn_expect(";");
+		}
+
+		return node;
 	}
 
 	function syn_declaration_specifiers() {
-		
+		var node = new Ast_Node("declaration_specifiers");
+		var child = null;
+		var has_one = false;
+		var has_match = false;
+
+		do {
+			has_match = false;
+
+			child = syn_storage_class_specifier()
+			     || syn_type_specifier()
+			     || syn_type_qualifier();
+
+			if (child) {
+				has_one = true;
+				has_match = true;
+				node.children.push(child);
+			}
+		} while(has_match)
+
+		if (has_one) {
+			return node;
+		} else {
+			syn_error("must be a valid type or modifier");
+		}
 	}
 
 	function syn_init_declarator_list() {
-		
+		var nodes = [];
+
+		do {
+			nodes.push(syn_init_declarator());
+		} while(syn_accept(","))
+
+		return nodes;
 	}
 
 	function syn_init_declarator() {
-		
+		var node = syn_declarator();
+
+		if (syn_accept("=")) {
+			node.children.push(syn_initializer());
+		}
+
+		return node;
 	}
 
 	function syn_storage_class_specifier() {
-		
+		if (syn_accept(
+			"typedef",
+			"extern",
+			"static",
+			"auto",
+			"register"
+		)) {
+			return new Ast_Node(syn_token.value);
+		}
 	}
 
 	function syn_type_specifier() {
-		
-	}
+		if (syn_accept(
+			"void",
+			"char",
+			"short",
+			"int",
+			"long",
+			"float",
+			"double",
+			"signed",
+			"unsigned",
+			"struct",
+			"union"
+		)) {
+			return new Ast_Node(syn_token.value);
+		} else if (syn_peek_type(0) === "enum") {
+			return syn_enum_specifier();
+		} else if (syn_type_table[syn_peek_value(0)]) {
+			return new Ast_Node(syn_token.value);
+		}
 
+	}
 	function syn_struct_or_union_specifier() {
-		
+		var node = syn_struct_or_union();
+		var has_one = false;
+
+		if (syn_accept("identifier")) {
+			has_one = true;
+			node.value = syn_token.value;
+		}
+
+		if (syn_accept("{")) {
+			has_one = true;
+			node.children.push(syn_struct_declaration_list());
+			syn_expect("}");
+		}
+
+		if (has_one) {
+			return node;
+		} else {
+			syn_error("invalid struct/union");
+		}
 	}
 
 	function syn_struct_or_union() {
-		
+		if (syn_accept(
+			"struct",
+			"union"
+		)) {
+			return new Ast_Node(syn_token.value);
+		} else {
+			syn_error("must be a struct or union");
+		}
 	}
 
 	function syn_struct_declaration_list() {
-		
+		var node = new Ast_Node("struct_declaration_list");
+		var has_one = false;
+		var has_error = false;
+		var child_error = null;
+
+		do {
+			try {
+				syn_push();
+				node.children.push(syn_struct_declaration());
+				syn_pop();
+			} catch(error) {
+				syn_restore();
+				has_error = true;
+				child_error = error;
+			}
+		} while(!has_error);
+
+		if (has_one) {
+			return node;
+		} else {
+			syn_error(child_error);
+		}
 	}
 
 	function syn_struct_declaration() {
-		
+		var node = new Ast_Node("struct_declaration");
+
+		node.children.push(syn_specifier_qualifier_list());
+		node.children.push(syn_struct_declarator_list());
+
+		return node;
 	}
 
 	function syn_specifier_qualifier_list() {
-		
+		var node = new Ast_Node("specifier_qualifier_list");
+		var child = null;
+		var has_one = false;
+		var has_match = false;
+
+		do {
+			has_match = false;
+			
+			child = syn_type_specifier()
+			     || syn_type_qualifier();
+
+			if (child) {
+				has_one = true;
+				has_match = true;
+				node.children.push(child);
+			}
+		} while(has_match)
+
+		if (has_one) {
+			return node;
+		} else {
+			syn_error("must be specifier or a qualifier");
+		}
 	}
 
-	function syn_declarator_list() {
-		
+	function syn_struct_declarator_list() {
+		var node = new Ast_Node("struct_declarator_list");
+		var has_one = false;
+		var has_error = false;
+		var child_error = null;
+
+		do {
+			try {
+				syn_push();
+				node.children.push(syn_struct_declarator());
+				syn_pop();
+			} catch(error) {
+				syn_restore();
+				has_error = true;
+				child_error = error;
+			}
+		} while(!has_error);
+
+		if (has_one) {
+			return node;
+		} else {
+			syn_error(child_error);
+		}
+
 	}
 
 	function syn_struct_declarator() {
-		
+		if (syn_accept(":")) {
+			return syn_constant_expression();
+		}
+
+		var node = syn_declarator();
+
+		if (syn_accept(":")) {
+			node.children.push(syn_constant_expression());
+		}
+
+		return node;
 	}
 
 	function syn_enum_specifier() {
-		
+		syn_expect("enum");
+
+		var node = new Ast_Node("enum_specifier");
+		var has_one = false;
+
+		if (syn_accept("identifier")) {
+			has_one = true;
+			node.value = syn_token.value;
+		}
+
+		if (syn_accept("{")) {
+			has_one = true;
+			node.children.push(syn_enumerator_list());
+			syn_expect("}");
+		}
+
+		if (has_one) {
+			return node;
+		} else {
+			syn_error("missing enum identifier or body");
+		}
 	}
 
 	function syn_enumerator_list() {
-		
+		var node = new Ast_Node("enumerator_list");
+
+		do {
+			node.children.push(syn_enumerator());
+		} while(syn_accept(","))
+
+		return node;
 	}
 
 	function syn_enumerator() {
-		
+		var node = new Ast_Node("enumerator");
+
+		syn_expect("identifier");
+		node.value = syn_token.value;
+
+		if (syn_accept("=")) {
+			node.children.push(syn_constant_expression());
+		}
+
+		return node;
 	}
 
 	function syn_type_qualifier() {
-		
+		if (syn_accept(
+			"const",
+			"volatile"
+		)) {
+			return new Ast_Node(syn_token.value);
+		}
 	}
 
 	function syn_declarator() {
@@ -869,11 +1100,8 @@ function() {
 	}
 
 	function syn_pointer() {
-		
-	}
-
-	function syn_type_qualifier_list() {
-		
+		var node = new Ast_Node("pointer");
+		var has_match = false;
 	}
 
 	function syn_parameter_type_list() {
@@ -961,14 +1189,11 @@ function() {
 	}
 
 	function syntax_analysis() {
-		syn_typedef_table = {};
-		syn_struct_table = {};
-		syn_union_table = {};
-		syn_enum_table = {};
+		syn_type_table = {};
 		syn_pos_stack = [];
 
 		if (!syn_eof()) {
-			syn_ast_root = syn_expression();
+			syn_ast_root = syn_enum_specifier();
 		}
 	}
 
@@ -997,10 +1222,7 @@ function() {
 		lex_current_line = 1;
 
 		syn_ast_root = null;
-		syn_typedef_table = null;
-		syn_struct_table = null;
-		syn_union_table = null;
-		syn_enum_table = null;
+		syn_type_table = null;
 		syn_pos_stack = null;
 		syn_current_pos = 0;
 	}
